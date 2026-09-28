@@ -1,25 +1,56 @@
 document.addEventListener("DOMContentLoaded", () => {
     const tempElement = document.getElementById("temp-value"), humElement = document.getElementById("hum-value");
     const statusElement = document.getElementById("status-badge"), timeElement = document.getElementById("last-update");
+    const deviceStatusEl = document.getElementById("device-status");
+    
     const tMaxEl = document.getElementById("temp-max"), tMinEl = document.getElementById("temp-min"), tAvgEl = document.getElementById("temp-avg");
     const hMaxEl = document.getElementById("hum-max"), hMinEl = document.getElementById("hum-min"), hAvgEl = document.getElementById("hum-avg");
     const heatIndexEl = document.getElementById("heat-index"), cardTemp = document.getElementById("card-temp"), statusTemp = document.getElementById("status-temp");
     const btnReset = document.getElementById("btn-reset");
 
-    // Variabel Penyimpanan Data
     let currentTemp = 0, currentHum = 0;
-    let minT = 999, maxT = -999, sumT = 0, countT = 0;
-    let minH = 999, maxH = -999, sumH = 0, countH = 0;
+    let deviceWatchdogTimer; // Timer untuk mendeteksi apakah ESP32 offline
 
-    // Fungsi Reset Data Min/Max/Avg
+    // === MENGAMBIL DATA TERSIMPAN DARI LOCAL STORAGE ===
+    // Jika belum ada data, gunakan nilai default (999 untuk min, -999 untuk max, 0 untuk sum/count)
+    let minT = parseFloat(localStorage.getItem("minT")) || 999;
+    let maxT = parseFloat(localStorage.getItem("maxT")) || -999;
+    let sumT = parseFloat(localStorage.getItem("sumT")) || 0;
+    let countT = parseInt(localStorage.getItem("countT")) || 0;
+    
+    let minH = parseFloat(localStorage.getItem("minH")) || 999;
+    let maxH = parseFloat(localStorage.getItem("maxH")) || -999;
+    let sumH = parseFloat(localStorage.getItem("sumH")) || 0;
+    let countH = parseInt(localStorage.getItem("countH")) || 0;
+
+    // Tampilkan data tersimpan ke UI saat pertama kali web dibuka
+    if (countT > 0) {
+        tMaxEl.innerText = maxT.toFixed(1);
+        tMinEl.innerText = minT.toFixed(1);
+        tAvgEl.innerText = (sumT/countT).toFixed(1);
+    }
+    if (countH > 0) {
+        hMaxEl.innerText = Math.floor(maxH);
+        hMinEl.innerText = Math.floor(minH);
+        hAvgEl.innerText = Math.floor(sumH/countH);
+    }
+
+    // === FUNGSI RESET DATA MIN/MAX/AVG ===
     btnReset.addEventListener("click", () => {
+        // Hapus dari memori permanen
+        localStorage.clear();
+        
+        // Reset Variabel
         minT = 999; maxT = -999; sumT = 0; countT = 0;
         minH = 999; maxH = -999; sumH = 0; countH = 0;
+        
+        // Reset Tampilan
         tMaxEl.innerText = "--"; tMinEl.innerText = "--"; tAvgEl.innerText = "--";
         hMaxEl.innerText = "--"; hMinEl.innerText = "--"; hAvgEl.innerText = "--";
-        alert("Statistik Min/Max/Avg berhasil di-reset!");
+        alert("Statistik Min/Max/Avg berhasil dihapus!");
     });
 
+    // === SETUP GRAFIK CHART.JS ===
     const ctx = document.getElementById('sensorChart').getContext('2d');
     const sensorChart = new Chart(ctx, {
         type: 'line',
@@ -54,7 +85,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const client = new Paho.MQTT.Client(broker, port, "/mqtt", clientId);
 
     client.onConnectionLost = (res) => {
-        statusElement.innerText = "Offline (Mencoba ulang...)"; statusElement.className = "status offline";
+        statusElement.innerText = "Offline (Mencoba ulang...)"; 
+        statusElement.className = "status offline";
+        deviceStatusEl.innerText = "Terputus (Web Offline)";
+        deviceStatusEl.className = "status offline";
         setTimeout(connectMQTT, 5000);
     };
 
@@ -63,24 +97,40 @@ document.addEventListener("DOMContentLoaded", () => {
             const data = JSON.parse(message.payloadString); 
             const newTemp = parseFloat(data.temp), newHum = parseFloat(data.hum);
             
+            // 1. UPDATE WAKTU & STATUS ALAT (WATCHDOG)
             const timeString = new Date().toLocaleTimeString('id-ID');
             timeElement.innerText = timeString;
+            
+            deviceStatusEl.innerText = "Aktif (Mengirim Data)";
+            deviceStatusEl.className = "status online";
+            
+            // Reset Timer Watchdog. Jika 10 detik kedepan tidak ada data, alat dianggap mati.
+            clearTimeout(deviceWatchdogTimer);
+            deviceWatchdogTimer = setTimeout(() => {
+                deviceStatusEl.innerText = "Terputus (ESP32 Offline/Mati)";
+                deviceStatusEl.className = "status offline";
+            }, 10000); 
 
-            // Update Statistik Suhu
+            // 2. UPDATE STATISTIK SUHU & SIMPAN PERMANEN
             if(newTemp > maxT) maxT = newTemp; 
             if(newTemp < minT) minT = newTemp; 
             sumT += newTemp; countT++;
             tMaxEl.innerText = maxT.toFixed(1); tMinEl.innerText = minT.toFixed(1); tAvgEl.innerText = (sumT/countT).toFixed(1);
+            
+            localStorage.setItem("maxT", maxT); localStorage.setItem("minT", minT); 
+            localStorage.setItem("sumT", sumT); localStorage.setItem("countT", countT);
 
-            // Update Statistik Kelembapan
+            // 3. UPDATE STATISTIK KELEMBAPAN & SIMPAN PERMANEN
             if(newHum > maxH) maxH = newHum; 
             if(newHum < minH) minH = newHum; 
             sumH += newHum; countH++;
             hMaxEl.innerText = Math.floor(maxH); hMinEl.innerText = Math.floor(minH); hAvgEl.innerText = Math.floor(sumH/countH);
-
-            heatIndexEl.innerText = calculateHeatIndex(newTemp, newHum);
             
-            // LOGIKA PERINGATAN WARNA
+            localStorage.setItem("maxH", maxH); localStorage.setItem("minH", minH); 
+            localStorage.setItem("sumH", sumH); localStorage.setItem("countH", countH);
+
+            // 4. PERINGATAN WARNA UI
+            heatIndexEl.innerText = calculateHeatIndex(newTemp, newHum);
             cardTemp.className = "card"; 
             if (newTemp < 30) { 
                 cardTemp.classList.add("normal"); statusTemp.innerText = "Kondisi Sejuk"; 
@@ -90,6 +140,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 cardTemp.classList.add("danger"); statusTemp.innerText = "AWAS: Sangat Panas!"; 
             }
 
+            // 5. ANIMASI ANGKA & UPDATE GRAFIK
             animateValue(tempElement, currentTemp, newTemp, 1000, true); animateValue(humElement, currentHum, newHum, 1000, false);
             currentTemp = newTemp; currentHum = newHum;
 
@@ -104,7 +155,7 @@ document.addEventListener("DOMContentLoaded", () => {
         client.connect({
             useSSL: true,
             onSuccess: () => {
-                statusElement.innerText = "Online (Live)"; statusElement.className = "status online";
+                statusElement.innerText = "Terhubung (Web OK)"; statusElement.className = "status online";
                 client.subscribe(topic_data); 
             },
             onFailure: () => { setTimeout(connectMQTT, 5000); }
